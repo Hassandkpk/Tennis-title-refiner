@@ -38,72 +38,69 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.markdown("## ⚡ Title Machine")
-st.markdown("Drop a competitor's outlier topic → get 4 variations tuned to your channel's style.")
+st.markdown("Drop a competitor's outlier topic → get 2 direct upgrades + one remix per viral title you paste.")
 
 st.divider()
 
 competitor_topic = st.text_area(
     "Competitor's outlier topic *",
-    placeholder='e.g. "Alex Eala KICKED OUT of tournament after shocking incident"',
     height=80
 )
 
 st.markdown("---")
 st.markdown("**Your context**")
 
-viral_titles = st.text_area(
-    "Your recent viral titles * — paste 3–5, one per line",
-    placeholder="Alex Eala SILENCED Everyone With This…\nThey Didn't Expect Alex Eala To Do THIS\nAlex Eala Just Changed Everything",
-    height=120
-)
-
-format_desc = st.text_area(
-    "Describe your current title format *",
-    placeholder='e.g. "All-caps trigger word at start, then a cliffhanger. No spoilers. Usually ends with … or a dramatic statement."',
-    height=90
+viral_titles_input = st.text_area(
+    "Your recent viral titles * — paste as many as you want, one per line",
+    height=150
 )
 
 extra_context = st.text_input(
-    "Extra context (optional)",
-    placeholder="e.g. faceless channel, Filipino audience, uploads 3x/week"
+    "Extra context (optional)"
 )
 
 st.markdown("")
-generate = st.button("Generate 4 Variations →")
+generate = st.button("Generate Variations →")
 
 if generate:
-    if not competitor_topic or not viral_titles or not format_desc:
-        st.error("Please fill in the competitor topic, your viral titles, and current format.")
+    if not competitor_topic or not viral_titles_input:
+        st.error("Please fill in the competitor topic and your viral titles.")
     else:
-        prompt = f"""You are a YouTube title strategist for a faceless tennis channel focused on Alex Eala. Your job is to generate viral title variations.
+        viral_titles = [t.strip() for t in viral_titles_input.strip().split("\n") if t.strip()]
+        num_viral = len(viral_titles)
+        viral_titles_formatted = "\n".join([f"{i+1}. {t}" for i, t in enumerate(viral_titles)])
+        total = 2 + num_viral
 
-Here is the competitor's outlier topic/title:
+        prompt = f"""You are a YouTube title strategist for a faceless tennis channel. Generate title variations based on a competitor's outlier topic.
+
+Competitor's outlier topic:
 "{competitor_topic}"
 
-Here are the channel's recent viral titles (learn from their format, style, and tone):
-{viral_titles}
+The channel's recent viral titles (each one has a distinct format/structure):
+{viral_titles_formatted}
 
-The creator describes their current title format as:
-"{format_desc}"
+{f"Extra context: {extra_context}" if extra_context else ""}
 
-{f"Extra context about the channel: {extra_context}" if extra_context else ""}
+Your task is to generate exactly {total} titles total, in two groups:
 
-Your task:
-1. Analyze the competitor's topic to extract the core hook/angle
-2. Generate EXACTLY 4 title variations that:
-   - Are unique (not a copy of the competitor)
-   - Match the format and tone described above
-   - Feel slightly rage-bait or emotionally charged to drive clicks
-   - Are tailored for the Alex Eala / tennis audience
-   - Vary from each other (don't repeat the same structure 4 times)
-3. Each title should feel like it belongs on this specific channel
+GROUP A — Direct Upgrades (always exactly 2):
+Take the competitor's title and upgrade it directly. Keep the exact same structure, format, emoji style, and topic. Only change the power words — replace weak or generic words with stronger, more emotionally charged, rage-bait alternatives. The upgraded title should feel like a more explosive version of the original.
 
-Return ONLY the 4 titles, numbered 1 to 4, one per line. No explanations, no preamble, no extra text. Just the titles."""
+GROUP B — Format Remixes (exactly {num_viral}, one per viral title):
+For each of the {num_viral} viral titles provided, remix the competitor's topic into that viral title's exact format and structure. Each remix must clearly mirror the pattern of its corresponding viral title. Apply the same structure, phrasing style, and dramatic technique from that viral title to the competitor's topic.
+
+Rules:
+- Keep the same player name(s) from the competitor's title in all variations
+- No spoilers
+- No explanations, no group labels, no preamble
+- Output only the titles, numbered sequentially from 1 to {total}
+
+Return ONLY the {total} titles, numbered 1 to {total}, one per line."""
 
         try:
             client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
 
-            with st.spinner("Cooking your titles..."):
+            with st.spinner("Generating your titles..."):
                 message = client.messages.create(
                     model="claude-opus-4-6",
                     max_tokens=1024,
@@ -116,14 +113,28 @@ Return ONLY the 4 titles, numbered 1 to 4, one per line. No explanations, no pre
                 for line in raw.split("\n")
                 if line.strip()
             ]
-            titles = [l for l in lines if l][:4]
+            titles = [l for l in lines if l]
 
             if titles:
-                st.markdown("### Generated Variations")
-                for i, title in enumerate(titles, 1):
+                upgrades = titles[:2]
+                remixes = titles[2:2 + num_viral]
+
+                st.markdown("### Direct Upgrades")
+                for i, title in enumerate(upgrades, 1):
                     st.markdown(f"""
                     <div class="title-card">
-                        <div class="card-num">Variation {i:02d}</div>
+                        <div class="card-num">Upgrade {i:02d}</div>
+                        {title}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    st.code(title, language=None)
+
+                st.markdown("### Format Remixes")
+                for i, (title, source) in enumerate(zip(remixes, viral_titles), 1):
+                    short_source = source[:60] + ('...' if len(source) > 60 else '')
+                    st.markdown(f"""
+                    <div class="title-card">
+                        <div class="card-num">Remix {i:02d} — based on: {short_source}</div>
                         {title}
                     </div>
                     """, unsafe_allow_html=True)
