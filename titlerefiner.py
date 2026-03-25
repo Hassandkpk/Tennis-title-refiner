@@ -1,5 +1,6 @@
 import streamlit as st
 import anthropic
+import requests
 
 st.set_page_config(page_title="Title Machine", page_icon="⚡", layout="centered")
 
@@ -34,39 +35,184 @@ st.markdown("""
         border-radius: 8px;
     }
     .stButton button:hover { background-color: #f0ff60; }
+    .viral-badge {
+        background: #e8ff47;
+        color: #0a0a0a;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 2px 8px;
+        border-radius: 4px;
+        margin-bottom: 8px;
+        display: inline-block;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+
+def fetch_top_videos(api_key, channel_id, max_results=5):
+    """Fetch top videos from a YouTube channel by view count."""
+    # Step 1: Get uploads playlist ID
+    channel_url = "https://www.googleapis.com/youtube/v3/channels"
+    channel_params = {
+        "part": "contentDetails",
+        "id": channel_id,
+        "key": api_key
+    }
+    r = requests.get(channel_url, params=channel_params)
+    r.raise_for_status()
+    data = r.json()
+
+    if not data.get("items"):
+        raise ValueError("Channel not found. Check your CHANNEL_ID.")
+
+    uploads_playlist = data["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    # Step 2: Get all video IDs from uploads (fetch up to 200)
+    video_ids = []
+    next_page_token = None
+    playlist_url = "https://www.googleapis.com/youtube/v3/playlistItems"
+
+    while len(video_ids) < 200:
+        params = {
+            "part": "contentDetails",
+            "playlistId": uploads_playlist,
+            "maxResults": 50,
+            "key": api_key
+        }
+        if next_page_token:
+            params["pageToken"] = next_page_token
+
+        resp = requests.get(playlist_url, params=params)
+        resp.raise_for_status()
+        page = resp.json()
+
+        for item in page.get("items", []):
+            video_ids.append(item["contentDetails"]["videoId"])
+
+        next_page_token = page.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    # Step 3: Get video stats in batches of 50
+    videos_data = []
+    videos_url = "https://www.googleapis.com/youtube/v3/videos"
+
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i+50]
+        params = {
+            "part": "snippet,statistics",
+            "id": ",".join(batch),
+            "key": api_key
+        }
+        resp = requests.get(videos_url, params=params)
+        resp.raise_for_status()
+        videos_data.extend(resp.json().get("items", []))
+
+    # Step 4: Sort by view count and return top N titles
+    videos_data.sort(
+        key=lambda v: int(v["statistics"].get("viewCount", 0)),
+        reverse=True
+    )
+
+    top_videos = []
+    for v in videos_data[:max_results]:
+        title = v["snippet"]["title"]
+        views = int(v["statistics"].get("viewCount", 0))
+        top_videos.append({"title": title, "views": views})
+
+    return top_videos
+
+
+# ── App UI ────────────────────────────────────────────────────────────────────
+
 st.markdown("## ⚡ Title Machine")
-st.markdown("Drop a competitor's outlier topic → get 2 direct upgrades + one remix per viral title you paste.")
+st.markdown("Competitor topic in → viral titles auto-loaded from your channel → 4 variations out.")
 
 st.divider()
 
+# ── Channel selector ──────────────────────────────────────────────────────────
+st.markdown("### 📺 Select Channel")
+
+# Load channels from secrets: expects CHANNELS as a TOML table
+# e.g. [CHANNELS]
+#       "Tennis World" = "UCxxxxxxxxxx"
+#       "Tennis Daily" = "UCyyyyyyyyyy"
+try:
+    channels = dict(st.secrets["CHANNELS"])  # {"Channel Name": "channel_id", ...}
+    channel_names = list(channels.keys())
+except KeyError:
+    st.error("No CHANNELS found in secrets. See setup instructions below.")
+    st.stop()
+
+col_sel, col_fetch = st.columns([3, 1])
+with col_sel:
+    selected_channel = st.selectbox("Which channel?", channel_names, label_visibility="collapsed")
+with col_fetch:
+    fetch_btn = st.button("Load Top Videos", use_container_width=True)
+
+# Reset videos when channel changes
+if "last_channel" not in st.session_state:
+    st.session_state.last_channel = None
+if "top_videos" not in st.session_state:
+    st.session_state.top_videos = []
+    st.session_state.viral_titles_text = ""
+
+if selected_channel != st.session_state.last_channel:
+    st.session_state.top_videos = []
+    st.session_state.viral_titles_text = ""
+    st.session_state.last_channel = selected_channel
+
+# Auto-load viral titles
+st.markdown("### 📊 Top Videos")
+
+if fetch_btn or not st.session_state.top_videos:
+    try:
+        yt_api_key = st.secrets["YOUTUBE_API_KEY"]
+        channel_id = channels[selected_channel]
+
+        with st.spinner(f"Fetching top videos for **{selected_channel}**..."):
+            top_videos = fetch_top_videos(yt_api_key, channel_id, max_results=5)
+            st.session_state.top_videos = top_videos
+            st.session_state.viral_titles_text = "\n".join([v["title"] for v in top_videos])
+            st.session_state.last_channel = selected_channel
+
+    except KeyError as e:
+        st.error(f"Missing secret: {e}. Add YOUTUBE_API_KEY and CHANNELS in Streamlit secrets.")
+    except Exception as e:
+        st.error(f"YouTube API error: {e}")
+
+if st.session_state.top_videos:
+    st.success(f"✅ Loaded top {len(st.session_state.top_videos)} videos from **{selected_channel}**")
+
+    for v in st.session_state.top_videos:
+        st.markdown(f"""
+        <div class="title-card">
+            <div class="viral-badge">👁 {v['views']:,} views</div><br>
+            {v['title']}
+        </div>
+        """, unsafe_allow_html=True)
+
+st.divider()
+
+# Competitor input
+st.markdown("### 🎯 Competitor's Outlier Topic")
 competitor_topic = st.text_area(
-    "Competitor's outlier topic *",
+    "Paste the competitor's title here *",
     height=80
 )
 
-st.markdown("---")
-st.markdown("**Your context**")
-
-viral_titles_input = st.text_area(
-    "Your recent viral titles * — paste as many as you want, one per line",
-    height=150
-)
-
-extra_context = st.text_input(
-    "Extra context (optional)"
-)
+extra_context = st.text_input("Extra context (optional)")
 
 st.markdown("")
 generate = st.button("Generate Variations →")
 
 if generate:
-    if not competitor_topic or not viral_titles_input:
-        st.error("Please fill in the competitor topic and your viral titles.")
+    if not competitor_topic:
+        st.error("Please paste the competitor's title.")
+    elif not st.session_state.viral_titles_text:
+        st.error("No viral titles loaded. Click 🔄 Refresh to fetch from YouTube.")
     else:
-        viral_titles = [t.strip() for t in viral_titles_input.strip().split("\n") if t.strip()]
+        viral_titles = [t.strip() for t in st.session_state.viral_titles_text.strip().split("\n") if t.strip()]
         num_viral = len(viral_titles)
         viral_titles_formatted = "\n".join([f"{i+1}. {t}" for i, t in enumerate(viral_titles)])
         total = 2 + num_viral
@@ -76,26 +222,28 @@ if generate:
 Competitor's outlier topic:
 "{competitor_topic}"
 
-The channel's recent viral titles (each one has a distinct format/structure):
+The channel's top viral titles (each has a distinct proven format/structure):
 {viral_titles_formatted}
 
 {f"Extra context: {extra_context}" if extra_context else ""}
 
-Your task is to generate exactly {total} titles total, in two groups:
+Generate exactly {total} titles total:
 
-GROUP A — Direct Upgrades (always exactly 2):
-Take the competitor's title and upgrade it directly. Keep the exact same structure, format, emoji style, and topic. Only change the power words — replace weak or generic words with stronger, more emotionally charged, rage-bait alternatives. The upgraded title should feel like a more explosive version of the original.
+GROUP A — Direct Upgrades (exactly 2):
+- Keep the same angle and topic as the competitor's title
+- Replace weak words with strong power words
+- Make it more clickbaity, rage-baity, or emotionally charged
+- Do NOT change the core topic
 
 GROUP B — Format Remixes (exactly {num_viral}, one per viral title):
-For each of the {num_viral} viral titles provided, remix the competitor's topic into that viral title's exact format and structure. Each remix must clearly mirror the pattern of its corresponding viral title. Apply the same structure, phrasing style, and dramatic technique from that viral title to the competitor's topic.
+- For each viral title above, extract its unique format/structure
+- Apply that exact format to the competitor's topic
+- Each remix must feel like it belongs on this channel
 
 Rules:
-- Keep the same player name(s) from the competitor's title in all variations
-- No spoilers
-- No explanations, no group labels, no preamble
-- Output only the titles, numbered sequentially from 1 to {total}
-
-Return ONLY the {total} titles, numbered 1 to {total}, one per line."""
+- Output ONLY the titles, one per line, no numbering, no labels, no explanations
+- GROUP A titles first (2 titles), then GROUP B titles ({num_viral} titles)
+- Total: exactly {total} lines"""
 
         try:
             client = anthropic.Anthropic(api_key=st.secrets["ANTHROPIC_API_KEY"])
@@ -116,11 +264,8 @@ Return ONLY the {total} titles, numbered 1 to {total}, one per line."""
             titles = [l for l in lines if l]
 
             if titles:
-                upgrades = titles[:2]
-                remixes = titles[2:2 + num_viral]
-
-                st.markdown("### Direct Upgrades")
-                for i, title in enumerate(upgrades, 1):
+                st.markdown("### ✏️ Direct Upgrades")
+                for i, title in enumerate(titles[:2], 1):
                     st.markdown(f"""
                     <div class="title-card">
                         <div class="card-num">Upgrade {i:02d}</div>
@@ -129,8 +274,8 @@ Return ONLY the {total} titles, numbered 1 to {total}, one per line."""
                     """, unsafe_allow_html=True)
                     st.code(title, language=None)
 
-                st.markdown("### Format Remixes")
-                for i, (title, source) in enumerate(zip(remixes, viral_titles), 1):
+                st.markdown("### 🔁 Format Remixes")
+                for i, (title, source) in enumerate(zip(titles[2:], viral_titles), 1):
                     short_source = source[:60] + ('...' if len(source) > 60 else '')
                     st.markdown(f"""
                     <div class="title-card">
