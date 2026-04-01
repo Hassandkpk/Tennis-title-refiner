@@ -232,11 +232,14 @@ GROUP A — Direct Upgrades (exactly 2):
 - Keep the exact same structure, format, emoji style, and topic as the competitor's title
 - Replace weak or generic words with stronger, more emotionally charged, rage-bait alternatives
 - The result should feel like a more explosive version of the original — same angle, harder language
+- Keep the title length same as competitor's title
+
 
 GROUP B — Format Remixes (exactly {num_viral}, one per viral title):
 - For each viral title listed above, extract its unique format and structure
 - Apply that exact format and structure to the competitor's topic
 - Each remix must clearly mirror its corresponding viral title's pattern and feel like it belongs on this channel
+- Keep the length between 80-90 characters 
 
 Rules:
 - Keep the same player name(s) from the competitor's title in all variations
