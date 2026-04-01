@@ -1,6 +1,7 @@
 import streamlit as st
 import anthropic
 import requests
+from datetime import datetime, timedelta, timezone
 
 st.set_page_config(page_title="Title Machine", page_icon="⚡", layout="centered")
 
@@ -49,16 +50,17 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-def fetch_top_videos(api_key, channel_id, max_results=5):
-    """Fetch top videos from a YouTube channel by view count."""
+def fetch_top_videos_this_week(api_key, channel_id, max_results=5):
+    """Fetch top videos published in last 7 days, sorted by view count."""
+
+    published_after = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     # Step 1: Get uploads playlist ID
-    channel_url = "https://www.googleapis.com/youtube/v3/channels"
-    channel_params = {
+    r = requests.get("https://www.googleapis.com/youtube/v3/channels", params={
         "part": "contentDetails",
         "id": channel_id,
         "key": api_key
-    }
-    r = requests.get(channel_url, params=channel_params)
+    })
     r.raise_for_status()
     data = r.json()
 
@@ -67,14 +69,14 @@ def fetch_top_videos(api_key, channel_id, max_results=5):
 
     uploads_playlist = data["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # Step 2: Get all video IDs from uploads (fetch up to 200)
+    # Step 2: Get video IDs published in last 7 days from uploads playlist
+    # Playlist is sorted newest-first so we stop as soon as we pass the 7-day window
     video_ids = []
     next_page_token = None
-    playlist_url = "https://www.googleapis.com/youtube/v3/playlistItems"
 
-    while len(video_ids) < 200:
+    while True:
         params = {
-            "part": "contentDetails",
+            "part": "contentDetails,snippet",
             "playlistId": uploads_playlist,
             "maxResults": 50,
             "key": api_key
@@ -82,75 +84,77 @@ def fetch_top_videos(api_key, channel_id, max_results=5):
         if next_page_token:
             params["pageToken"] = next_page_token
 
-        resp = requests.get(playlist_url, params=params)
+        resp = requests.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params)
         resp.raise_for_status()
         page = resp.json()
 
+        stop_early = False
         for item in page.get("items", []):
-            video_ids.append(item["contentDetails"]["videoId"])
+            published_at = item["snippet"].get("publishedAt", "")
+            if published_at >= published_after:
+                video_ids.append(item["contentDetails"]["videoId"])
+            else:
+                stop_early = True
+                break
 
         next_page_token = page.get("nextPageToken")
-        if not next_page_token:
+        if not next_page_token or stop_early:
             break
 
-    # Step 3: Get video stats in batches of 50
-    videos_data = []
-    videos_url = "https://www.googleapis.com/youtube/v3/videos"
+    if not video_ids:
+        raise ValueError("No videos found in the last 7 days for this channel.")
 
+    # Step 3: Get stats for all videos in batches of 50
+    videos_data = []
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i+50]
-        params = {
+        resp = requests.get("https://www.googleapis.com/youtube/v3/videos", params={
             "part": "snippet,statistics",
             "id": ",".join(batch),
             "key": api_key
-        }
-        resp = requests.get(videos_url, params=params)
+        })
         resp.raise_for_status()
         videos_data.extend(resp.json().get("items", []))
 
-    # Step 4: Sort by view count and return top N titles
+    # Step 4: Sort by views, return top N
     videos_data.sort(
         key=lambda v: int(v["statistics"].get("viewCount", 0)),
         reverse=True
     )
 
-    top_videos = []
-    for v in videos_data[:max_results]:
-        title = v["snippet"]["title"]
-        views = int(v["statistics"].get("viewCount", 0))
-        top_videos.append({"title": title, "views": views})
+    return [
+        {
+            "title": v["snippet"]["title"],
+            "views": int(v["statistics"].get("viewCount", 0)),
+            "published": v["snippet"]["publishedAt"][:10]
+        }
+        for v in videos_data[:max_results]
+    ]
 
-    return top_videos
 
-
-# ── App UI ────────────────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────────────
 
 st.markdown("## ⚡ Title Machine")
-st.markdown("Competitor topic in → viral titles auto-loaded from your channel → 4 variations out.")
+st.markdown("Competitor topic in → top videos from last 7 days auto-loaded → variations out.")
 
 st.divider()
 
-# ── Channel selector ──────────────────────────────────────────────────────────
-st.markdown("### 📺 Select Channel")
+st.markdown("### Select channel")
 
-# Load channels from secrets: expects CHANNELS as a TOML table
-# e.g. [CHANNELS]
-#       "Tennis World" = "UCxxxxxxxxxx"
-#       "Tennis Daily" = "UCyyyyyyyyyy"
 try:
-    channels = dict(st.secrets["CHANNELS"])  # {"Channel Name": "channel_id", ...}
+    channels = dict(st.secrets["CHANNELS"])
     channel_names = list(channels.keys())
 except KeyError:
-    st.error("No CHANNELS found in secrets. See setup instructions below.")
+    st.error("No CHANNELS found in secrets. Add them in Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
 col_sel, col_fetch = st.columns([3, 1])
 with col_sel:
     selected_channel = st.selectbox("Which channel?", channel_names, label_visibility="collapsed")
 with col_fetch:
-    fetch_btn = st.button("Load Top Videos", use_container_width=True)
+    fetch_btn = st.button("Load This Week", use_container_width=True)
 
-# Reset videos when channel changes
+# Reset state on channel change
 if "last_channel" not in st.session_state:
     st.session_state.last_channel = None
 if "top_videos" not in st.session_state:
@@ -162,45 +166,40 @@ if selected_channel != st.session_state.last_channel:
     st.session_state.viral_titles_text = ""
     st.session_state.last_channel = selected_channel
 
-# Auto-load viral titles
-st.markdown("### 📊 Top Videos")
+st.markdown("### Top videos — last 7 days")
 
 if fetch_btn or not st.session_state.top_videos:
     try:
         yt_api_key = st.secrets["YOUTUBE_API_KEY"]
         channel_id = channels[selected_channel]
 
-        with st.spinner(f"Fetching top videos for **{selected_channel}**..."):
-            top_videos = fetch_top_videos(yt_api_key, channel_id, max_results=5)
+        with st.spinner(f"Fetching last 7 days for **{selected_channel}**..."):
+            top_videos = fetch_top_videos_this_week(yt_api_key, channel_id, max_results=5)
             st.session_state.top_videos = top_videos
             st.session_state.viral_titles_text = "\n".join([v["title"] for v in top_videos])
             st.session_state.last_channel = selected_channel
 
+    except ValueError as e:
+        st.warning(str(e))
     except KeyError as e:
         st.error(f"Missing secret: {e}. Add YOUTUBE_API_KEY and CHANNELS in Streamlit secrets.")
     except Exception as e:
         st.error(f"YouTube API error: {e}")
 
 if st.session_state.top_videos:
-    st.success(f"✅ Loaded top {len(st.session_state.top_videos)} videos from **{selected_channel}**")
-
+    st.success(f"Top {len(st.session_state.top_videos)} videos from the last 7 days — **{selected_channel}**")
     for v in st.session_state.top_videos:
         st.markdown(f"""
         <div class="title-card">
-            <div class="viral-badge">👁 {v['views']:,} views</div><br>
+            <div class="viral-badge">👁 {v['views']:,} views &nbsp;·&nbsp; {v['published']}</div><br>
             {v['title']}
         </div>
         """, unsafe_allow_html=True)
 
 st.divider()
 
-# Competitor input
-st.markdown("### 🎯 Competitor's Outlier Topic")
-competitor_topic = st.text_area(
-    "Paste the competitor's title here *",
-    height=80
-)
-
+st.markdown("### Competitor's outlier topic")
+competitor_topic = st.text_area("Paste the competitor's title here *", height=80)
 extra_context = st.text_input("Extra context (optional)")
 
 st.markdown("")
@@ -210,7 +209,7 @@ if generate:
     if not competitor_topic:
         st.error("Please paste the competitor's title.")
     elif not st.session_state.viral_titles_text:
-        st.error("No viral titles loaded. Click 🔄 Refresh to fetch from YouTube.")
+        st.error("No videos loaded. Click 'Load This Week' first.")
     else:
         viral_titles = [t.strip() for t in st.session_state.viral_titles_text.strip().split("\n") if t.strip()]
         num_viral = len(viral_titles)
@@ -222,7 +221,7 @@ if generate:
 Competitor's outlier topic:
 "{competitor_topic}"
 
-The channel's top viral titles (each has a distinct proven format/structure):
+The channel's top viral titles from this week (each has a distinct proven format/structure):
 {viral_titles_formatted}
 
 {f"Extra context: {extra_context}" if extra_context else ""}
@@ -230,19 +229,20 @@ The channel's top viral titles (each has a distinct proven format/structure):
 Generate exactly {total} titles total:
 
 GROUP A — Direct Upgrades (exactly 2):
-- Keep the same angle and topic as the competitor's title
-- Replace weak words with strong power words
-- Make it more clickbaity, rage-baity, or emotionally charged
-- Do NOT change the core topic
+- Keep the exact same structure, format, emoji style, and topic as the competitor's title
+- Replace weak or generic words with stronger, more emotionally charged, rage-bait alternatives
+- The result should feel like a more explosive version of the original — same angle, harder language
 
 GROUP B — Format Remixes (exactly {num_viral}, one per viral title):
-- For each viral title above, extract its unique format/structure
-- Apply that exact format to the competitor's topic
-- Each remix must feel like it belongs on this channel
+- For each viral title listed above, extract its unique format and structure
+- Apply that exact format and structure to the competitor's topic
+- Each remix must clearly mirror its corresponding viral title's pattern and feel like it belongs on this channel
 
 Rules:
+- Keep the same player name(s) from the competitor's title in all variations
+- No spoilers
 - Output ONLY the titles, one per line, no numbering, no labels, no explanations
-- GROUP A titles first (2 titles), then GROUP B titles ({num_viral} titles)
+- GROUP A first (2 titles), then GROUP B ({num_viral} titles)
 - Total: exactly {total} lines"""
 
         try:
@@ -264,7 +264,7 @@ Rules:
             titles = [l for l in lines if l]
 
             if titles:
-                st.markdown("### ✏️ Direct Upgrades")
+                st.markdown("### Direct upgrades")
                 for i, title in enumerate(titles[:2], 1):
                     st.markdown(f"""
                     <div class="title-card">
@@ -274,7 +274,7 @@ Rules:
                     """, unsafe_allow_html=True)
                     st.code(title, language=None)
 
-                st.markdown("### 🔁 Format Remixes")
+                st.markdown("### Format remixes")
                 for i, (title, source) in enumerate(zip(titles[2:], viral_titles), 1):
                     short_source = source[:60] + ('...' if len(source) > 60 else '')
                     st.markdown(f"""
